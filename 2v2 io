@@ -1,0 +1,1019 @@
+// ==UserScript==
+// @name         Cheats for 2v2.io | W cheats
+// @namespace    http://tampermonkey.net/
+// @version      3.2
+// @description  Best Cheat for 2v2.io - Menu Key: INSERT | Damage Boost, Speed Hack, ESP, Rave Mode, Instant Kill, Invisibility and more
+// @match        *://2v2.io/*
+// @match        *://*.2v2.io/*
+// @grant        none
+// @run-at       document-start
+// @license      Friends
+// ==/UserScript==
+ 
+(() => {
+'use strict';
+ 
+try {
+    // ============================================
+    // CONFIG
+    // ============================================
+    const config = {
+        esp: false,
+        wireframe: false,
+        xray: false,
+ 
+        damageBoost: false,
+        damageMultiplier: 10,
+        noRecoil: false,
+        rapidFire: false,
+        rapidFireRate: 30,
+        autoShoot: false,
+ 
+        speedHack: false,
+        speedMultiplier: 2.0,
+        bunnyHop: false,
+        autoStrafe: false,
+        infiniteJump: false,
+        noFallDamage: false,
+ 
+        crosshairCustom: false,
+        crosshairType: 'cross',
+        crosshairColor: '#ff0000',
+        crosshairSize: 12,
+ 
+        raveMode: false,
+        colorMod: false,
+        colorModColor: '#ff0000',
+        colorModOpacity: 0.2,
+        chaosMode: false,
+        performanceMode: false,
+        adRemover: false,
+ 
+        autoRespawn: false,
+        antiAFK: false,
+        spinBot: false,
+        spinSpeed: 15,
+        fpsBoost: false,
+        hitMarker: true,
+        killSound: true,
+        statsOverlay: true,
+ 
+        gameSpeed: 1.0,
+        gameSpeedEnabled: false
+    };
+ 
+    const Signatures = {
+        ping:              "f3 07 01 00 00",
+        pong:              "f3 06 01 01 01",
+        anotherPing:       "f3 04 e2 03 e3",
+        createGame:        "f3 02 e3 03 ff 07 06",
+        updateState:       "f3 02 fd 02 f4 03 c8",
+        damageTaken:       "f3 04 c8 02 f5 15 04",
+        connectStarts:     "f3 02 e",
+        connectEnds:       "f1 1c e8 1c bf 0b 23"
+    };
+ 
+    function bytesToHexStr(bytes) {
+        let hexArray = Array.from(bytes).map(byte => byte.toString(16).padStart(2, '0'));
+        return hexArray.join(" ");
+    }
+ 
+    let menuOpen = false;
+    let gameSocket = null;
+    let killCount = 0;
+    let firstRun = true;
+ 
+    const intervals = {};
+ 
+    // ============================================
+    // GAME SPEED ENGINE
+    // ============================================
+    const GameSpeedEngine = {
+        _origRAF: window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : null,
+        _origSetInterval: window.setInterval.bind(window),
+        _origSetTimeout: window.setTimeout.bind(window),
+        _origClearInterval: window.clearInterval.bind(window),
+        _origClearTimeout: window.clearTimeout.bind(window),
+        _origDateNow: Date.now.bind(Date),
+        _origPerfNow: performance.now ? performance.now.bind(performance) : () => Date.now(),
+        _startTime: Date.now(),
+        _startPerf: performance.now ? performance.now() : Date.now(),
+        _enabled: false,
+        _speed: 1.0,
+        _timeOffset: 0,
+        _perfOffset: 0,
+ 
+        enable(speed) {
+            if (this._enabled && this._speed === speed) return;
+            const realNow = this._origDateNow();
+            const realPerf = this._origPerfNow();
+            if (this._enabled) {
+                this._timeOffset = this.getModifiedTime() - realNow;
+                this._perfOffset = this.getModifiedPerf() - realPerf;
+            }
+            this._speed = speed;
+            this._startTime = realNow;
+            this._startPerf = realPerf;
+            this._enabled = true;
+            this._patchTimers();
+        },
+ 
+        disable() {
+            this._enabled = false;
+            this._speed = 1.0;
+            this._timeOffset = 0;
+            this._perfOffset = 0;
+            this._unpatchTimers();
+        },
+ 
+        getModifiedTime() {
+            if (!this._enabled) return this._origDateNow();
+            const elapsed = this._origDateNow() - this._startTime;
+            return this._startTime + this._timeOffset + (elapsed * this._speed);
+        },
+ 
+        getModifiedPerf() {
+            if (!this._enabled) return this._origPerfNow();
+            const elapsed = this._origPerfNow() - this._startPerf;
+            return this._startPerf + this._perfOffset + (elapsed * this._speed);
+        },
+ 
+        _patchTimers() {
+            const self = this;
+            Date.now = function() { return Math.floor(self.getModifiedTime()); };
+            performance.now = function() { return self.getModifiedPerf(); };
+            window.setInterval = function(fn, delay, ...args) {
+                const modDelay = Math.max(1, Math.floor(delay / self._speed));
+                return self._origSetInterval(fn, modDelay, ...args);
+            };
+            window.setTimeout = function(fn, delay, ...args) {
+                const modDelay = Math.max(1, Math.floor(delay / self._speed));
+                return self._origSetTimeout(fn, modDelay, ...args);
+            };
+            window.clearInterval = function(id) { return self._origClearInterval(id); };
+            window.clearTimeout = function(id) { return self._origClearTimeout(id); };
+        },
+ 
+        _unpatchTimers() {
+            Date.now = this._origDateNow;
+            performance.now = this._origPerfNow.bind(performance);
+            window.setInterval = this._origSetInterval;
+            window.setTimeout = this._origSetTimeout;
+            window.clearInterval = this._origClearInterval;
+            window.clearTimeout = this._origClearTimeout;
+        }
+    };
+ 
+    // ============================================
+    // WEBSOCKET HOOK (Prototype Level)
+    // ============================================
+    const OrigWS = window.WebSocket;
+ 
+    // 1. Hook send
+    const origSend = OrigWS.prototype.send;
+    OrigWS.prototype.send = function(data) {
+        try {
+            if (!gameSocket) {
+                gameSocket = this;
+                console.log('%c[2v2.io MOD] WebSocket captured (send) ✧', 'color:#ff6b9d');
+            }
+ 
+            if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+                const isView = ArrayBuffer.isView(data);
+                const buffer = isView ? data.buffer : data;
+                const byteOffset = isView ? data.byteOffset : 0;
+                const byteLength = isView ? data.byteLength : data.byteLength;
+ 
+                let bytes = new Uint8Array(buffer, byteOffset, byteLength);
+ 
+                const processed = processOutgoing(bytes);
+                if (processed === null) return; // Drop packet if null
+ 
+                // Damage Boost: replay attack packets multiple times (multi-hit)
+                if (config.damageBoost && processed) {
+                    // Only replay small packets that look like attack/shoot actions
+                    if (processed.length >= 2 && processed.length <= 32) {
+                        const repeatCount = Math.min(config.damageMultiplier, 20); // cap at 20 repeats
+                        for (let i = 1; i < repeatCount; i++) {
+                            try {
+                                const copy = new Uint8Array(processed.length);
+                                copy.set(processed);
+                                GameSpeedEngine._origSetTimeout(() => {
+                                    try { origSend.call(this, copy); } catch(e) {}
+                                }, i * 2);
+                            } catch(e) {}
+                        }
+                    }
+                }
+ 
+                return origSend.call(this, processed);
+            }
+        } catch (err) {
+            console.error('[2v2.io MOD] Error in ws.send handler:', err);
+        }
+        return origSend.call(this, data);
+    };
+ 
+    // 2. Hook addEventListener & removeEventListener
+    const origAddEventListener = OrigWS.prototype.addEventListener;
+    OrigWS.prototype.addEventListener = function(type, listener, options) {
+        if (type === 'message') {
+            const self = this;
+            const wrappedListener = function(event) {
+                const processedEvent = processIncomingEvent(event);
+                if (processedEvent === null) return;
+                listener.call(self, processedEvent);
+            };
+            if (!this._messageListeners) this._messageListeners = new Map();
+            this._messageListeners.set(listener, wrappedListener);
+            return origAddEventListener.call(this, type, wrappedListener, options);
+        }
+        if (type === 'open') {
+            gameSocket = this;
+            console.log('%c[2v2.io MOD] WebSocket captured (open) ✧', 'color:#ff6b9d');
+        }
+        return origAddEventListener.call(this, type, listener, options);
+    };
+ 
+    const origRemoveEventListener = OrigWS.prototype.removeEventListener;
+    OrigWS.prototype.removeEventListener = function(type, listener, options) {
+        if (type === 'message' && this._messageListeners && this._messageListeners.has(listener)) {
+            const wrapped = this._messageListeners.get(listener);
+            this._messageListeners.delete(listener);
+            return origRemoveEventListener.call(this, type, wrapped, options);
+        }
+        return origRemoveEventListener.call(this, type, listener, options);
+    };
+ 
+    // 3. Hook onmessage using prototype property descriptor
+    const descriptor = Object.getOwnPropertyDescriptor(OrigWS.prototype, 'onmessage');
+    if (descriptor && descriptor.set) {
+        Object.defineProperty(OrigWS.prototype, 'onmessage', {
+            get() {
+                return this._userOnMessage || null;
+            },
+            set(val) {
+                this._userOnMessage = val;
+                if (val) {
+                    descriptor.set.call(this, function(event) {
+                        const processedEvent = processIncomingEvent(event);
+                        if (processedEvent === null) return;
+                        val.call(this, processedEvent);
+                    });
+                } else {
+                    descriptor.set.call(this, null);
+                }
+            },
+            configurable: true,
+            enumerable: true
+        });
+    } else {
+        // Fallback descriptor definition
+        Object.defineProperty(OrigWS.prototype, 'onmessage', {
+            get() {
+                return this._userOnMessage || null;
+            },
+            set(val) {
+                if (this._userOnMessageListener) {
+                    this.removeEventListener('message', this._userOnMessageListener);
+                    this._userOnMessageListener = null;
+                }
+                this._userOnMessage = val;
+                if (val) {
+                    const self = this;
+                    this._userOnMessageListener = function(event) {
+                        val.call(self, event);
+                    };
+                    this.addEventListener('message', this._userOnMessageListener);
+                }
+            },
+            configurable: true,
+            enumerable: true
+        });
+    }
+ 
+    function processOutgoing(bytes) {
+        if (bytes.length < 1) return bytes;
+ 
+        if (config.noRecoil && bytes.length >= 8) {
+            if (bytes[0] === 0x05 || bytes[0] === 0x06) {
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                for (let i = 4; i < Math.min(bytes.length, 16); i += 4) {
+                    try { view.setFloat32(i, 0, true); } catch(e) {}
+                }
+            }
+        }
+        if (config.speedHack && bytes.length >= 12) {
+            if (bytes[0] === 0x03 || bytes[0] === 0x04 || bytes[0] === 0x02) {
+                try {
+                    const newBytes = new Uint8Array(bytes.length);
+                    newBytes.set(bytes);
+                    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                    const newView = new DataView(newBytes.buffer, newBytes.byteOffset, newBytes.byteLength);
+                    for (let offset = 1; offset + 3 < bytes.length; offset += 4) {
+                        try {
+                            const val = view.getFloat32(offset, true);
+                            if (Math.abs(val) > 0.001 && Math.abs(val) < 100) {
+                                newView.setFloat32(offset, val * config.speedMultiplier, true);
+                            }
+                        } catch(e) {}
+                    }
+                    return newBytes;
+                } catch(e) {}
+            }
+        }
+        if (config.noFallDamage && bytes.length >= 4) {
+            if (bytes[0] === 0x0A || bytes[0] === 0x0B) return null;
+        }
+        return bytes;
+    }
+ 
+    function processIncoming(data) {
+        if (config.hitMarker || config.killSound) {
+            try {
+                let bytes;
+                if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+                else if (data instanceof Uint8Array) bytes = data;
+                if (bytes && bytes[0] === 0x10) { if (config.hitMarker) showHitMarker(); }
+                if (bytes && bytes[0] === 0x11) {
+                    killCount++;
+                    if (config.killSound) playKillSound();
+                    updateStats();
+                }
+            } catch(e) {}
+        }
+    }
+ 
+    function processIncomingEvent(event) {
+        return event;
+    }
+ 
+    // ============================================
+    // WebGL HOOKS (Safe)
+    // ============================================
+    HTMLCanvasElement.prototype.getContext = new Proxy(HTMLCanvasElement.prototype.getContext, {
+        apply(target, thisArg, args) {
+            if (args[1]) {
+                args[1].preserveDrawingBuffer = true;
+                if (config.fpsBoost || config.performanceMode) {
+                    args[1].antialias = false;
+                    args[1].powerPreference = 'high-performance';
+                }
+            }
+            return Reflect.apply(...arguments);
+        }
+    });
+ 
+    try {
+        const WebGL = WebGL2RenderingContext.prototype;
+        const safeDrawHandler = {
+            apply(target, thisArg, args) {
+                const vc = args[1];
+                if (config.wireframe && vc > 6) args[0] = thisArg.LINES;
+                if (config.xray) thisArg.disable(thisArg.DEPTH_TEST);
+                const result = Reflect.apply(...arguments);
+                if (config.xray) thisArg.enable(thisArg.DEPTH_TEST);
+                return result;
+            }
+        };
+        WebGL.drawElements = new Proxy(WebGL.drawElements, safeDrawHandler);
+        WebGL.drawElementsInstanced = new Proxy(WebGL.drawElementsInstanced, safeDrawHandler);
+    } catch(e) {}
+ 
+    // ============================================
+    // EXPLOIT FUNCTIONS
+    // ============================================
+    function startSpeedHack() {
+        if (intervals.speed) return;
+        const pressed = new Set();
+        document.addEventListener('keydown', e => { if ('wasd'.includes(e.key.toLowerCase())) pressed.add(e.key.toLowerCase()); });
+        document.addEventListener('keyup', e => { if ('wasd'.includes(e.key.toLowerCase())) pressed.delete(e.key.toLowerCase()); });
+        intervals.speed = GameSpeedEngine._origSetInterval(() => {
+            if (!config.speedHack) return;
+            const c = document.querySelector('canvas');
+            if (!c || c.style.cursor !== 'none') return;
+            const extra = Math.floor(config.speedMultiplier) - 1;
+            pressed.forEach(key => {
+                for (let i = 0; i < extra; i++) {
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key, code: `Key${key.toUpperCase()}`, bubbles: true, repeat: true }));
+                }
+            });
+        }, 8);
+    }
+    function stopSpeedHack() { if (intervals.speed) { GameSpeedEngine._origClearInterval(intervals.speed); intervals.speed = null; } }
+ 
+    function startRapidFire() {
+        if (intervals.rapid) return;
+        let md = false;
+        document.addEventListener('mousedown', e => { if (e.button === 0) md = true; });
+        document.addEventListener('mouseup', e => { if (e.button === 0) md = false; });
+        intervals.rapid = GameSpeedEngine._origSetInterval(() => {
+            if (!config.rapidFire || !md) return;
+            const c = document.querySelector('canvas');
+            if (!c || c.style.cursor !== 'none') return;
+            c.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+            GameSpeedEngine._origSetTimeout(() => c.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })), 3);
+        }, config.rapidFireRate);
+    }
+    function stopRapidFire() { if (intervals.rapid) { GameSpeedEngine._origClearInterval(intervals.rapid); intervals.rapid = null; } }
+ 
+    function startBunnyHop() {
+        if (intervals.bhop) return;
+        intervals.bhop = GameSpeedEngine._origSetInterval(() => {
+            if (!config.bunnyHop) return;
+            const c = document.querySelector('canvas');
+            if (!c || c.style.cursor !== 'none') return;
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true }));
+            GameSpeedEngine._origSetTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true })), 40);
+        }, 100);
+    }
+    function stopBunnyHop() { if (intervals.bhop) { GameSpeedEngine._origClearInterval(intervals.bhop); intervals.bhop = null; } }
+ 
+    function startInfiniteJump() {
+        if (intervals.ijump) return;
+        intervals.ijump = true;
+        document.addEventListener('keydown', e => {
+            if (!config.infiniteJump || e.code !== 'Space') return;
+            GameSpeedEngine._origSetTimeout(() => {
+                document.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true }));
+                GameSpeedEngine._origSetTimeout(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true })), 10);
+            }, 30);
+        });
+    }
+ 
+    function startAutoStrafe() {
+        if (intervals.strafe) return;
+        let dir = false;
+        intervals.strafe = GameSpeedEngine._origSetInterval(() => {
+            if (!config.autoStrafe) return;
+            const c = document.querySelector('canvas');
+            if (!c || c.style.cursor !== 'none') return;
+            const key = dir ? 'a' : 'd';
+            document.dispatchEvent(new KeyboardEvent('keydown', { key, code: `Key${key.toUpperCase()}`, bubbles: true }));
+            GameSpeedEngine._origSetTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', { key, code: `Key${key.toUpperCase()}`, bubbles: true })), 80);
+            dir = !dir;
+        }, 160);
+    }
+    function stopAutoStrafe() { if (intervals.strafe) { GameSpeedEngine._origClearInterval(intervals.strafe); intervals.strafe = null; } }
+ 
+    function startSpinBot() {
+        if (intervals.spin) return;
+        intervals.spin = GameSpeedEngine._origSetInterval(() => {
+            if (!config.spinBot) return;
+            const c = document.querySelector('canvas');
+            if (!c || c.style.cursor !== 'none') return;
+            window.dispatchEvent(new MouseEvent('mousemove', { movementX: config.spinSpeed, movementY: 0 }));
+        }, 8);
+    }
+    function stopSpinBot() { if (intervals.spin) { GameSpeedEngine._origClearInterval(intervals.spin); intervals.spin = null; } }
+ 
+    function startAntiAFK() {
+        if (intervals.afk) return;
+        intervals.afk = GameSpeedEngine._origSetInterval(() => {
+            if (!config.antiAFK) return;
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true }));
+            GameSpeedEngine._origSetTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', { key: 'w', bubbles: true })), 50);
+        }, 30000);
+    }
+    function stopAntiAFK() { if (intervals.afk) { GameSpeedEngine._origClearInterval(intervals.afk); intervals.afk = null; } }
+ 
+    function startAutoRespawn() {
+        if (intervals.respawn) return;
+        intervals.respawn = GameSpeedEngine._origSetInterval(() => {
+            if (!config.autoRespawn) return;
+            document.querySelectorAll('button, div[class*="respawn"], div[class*="play"]').forEach(btn => {
+                const t = btn.textContent?.toLowerCase() || '';
+                if (t.includes('respawn') || t.includes('play') || t.includes('start')) btn.click();
+            });
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        }, 2000);
+    }
+    function stopAutoRespawn() { if (intervals.respawn) { GameSpeedEngine._origClearInterval(intervals.respawn); intervals.respawn = null; } }
+ 
+    function removeAds() {
+        const ads = document.querySelectorAll('iframe, .ad, [id*=ads], [class*=ads], .adsbygoogle, [id*=banner], [class*=banner], [id*=advertisement]');
+        ads.forEach(ad => { try { ad.remove(); } catch(e) {} });
+    }
+ 
+    function showHitMarker() {
+        const hm = document.getElementById('yk-hitmarker');
+        if (!hm) return;
+        hm.style.opacity = '1';
+        hm.style.transform = 'translate(-50%, -50%) scale(1.3)';
+        GameSpeedEngine._origSetTimeout(() => { hm.style.opacity = '0'; hm.style.transform = 'translate(-50%, -50%) scale(0.8)'; }, 150);
+    }
+ 
+    function playKillSound() {
+        try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain); gain.connect(ctx.destination);
+            osc.frequency.setValueAtTime(880, ctx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.08);
+            osc.frequency.exponentialRampToValueAtTime(2200, ctx.currentTime + 0.15);
+            gain.gain.setValueAtTime(0.25, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+            osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.35);
+        } catch(e) {}
+    }
+ 
+    function updateStats() {
+        const el = document.getElementById('yk-kills');
+        if (el) el.textContent = killCount;
+    }
+ 
+    // ============================================
+    // SPLASH SCREEN
+    // ============================================
+    function showSplashScreen() {
+        const splash = document.createElement('div');
+        splash.id = 'yk-splash';
+        splash.innerHTML = `
+        <style>
+            #yk-splash {
+                position:fixed;inset:0;
+                background:radial-gradient(ellipse at 30% 20%, rgba(30,5,40,0.98), rgba(8,2,18,0.99) 70%);
+                z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;
+                font-family:system-ui,sans-serif;overflow:hidden;
+                transition:opacity 0.8s ease, transform 0.8s ease, filter 0.8s ease;
+            }
+            #yk-splash.hide { opacity:0; transform:scale(1.1); filter:blur(12px); pointer-events:none; }
+            .yk-splash-logo-inner {
+                width:100px;height:100px;
+                background:linear-gradient(135deg, #ff6b9d, #c084fc, #818cf8, #38bdf8);
+                border-radius:28px;display:flex;align-items:center;justify-content:center;
+                font-size:48px;
+                box-shadow:0 0 60px rgba(255,107,157,0.4), 0 0 120px rgba(192,132,252,0.2);
+                animation:logoPulse 2s ease-in-out infinite;margin-bottom:24px;
+            }
+            @keyframes logoPulse {
+                0%,100% { box-shadow:0 0 60px rgba(255,107,157,0.4); }
+                50% { box-shadow:0 0 80px rgba(255,107,157,0.6), 0 0 160px rgba(192,132,252,0.3); }
+            }
+            .yk-splash-title { font-size:42px;font-weight:900;background:linear-gradient(135deg, #ff6b9d, #c084fc, #818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px; }
+            .yk-splash-sub { font-size:14px;color:rgba(200,180,220,0.6);margin-bottom:30px; }
+            .yk-splash-bar-wrap { width:280px;height:4px;background:rgba(255,255,255,0.04);border-radius:4px;overflow:hidden;margin-bottom:14px; }
+            .yk-splash-bar { height:100%;width:0%;border-radius:4px;background:linear-gradient(90deg, #ff6b9d, #c084fc, #818cf8, #38bdf8);transition:width 0.4s ease; }
+            .yk-splash-status { font-size:11px;color:rgba(200,180,220,0.5);font-family:monospace; }
+        </style>
+        <div class="yk-splash-logo-inner">⚡</div>
+        <div class="yk-splash-title">2v2.io MOD</div>
+        <div class="yk-splash-sub">✧ Ultimate Edition v3.1 ✧</div>
+        <div class="yk-splash-bar-wrap"><div class="yk-splash-bar" id="yk-splash-bar"></div></div>
+        <div class="yk-splash-status" id="yk-splash-status">Initializing...</div>`;
+        document.body.appendChild(splash);
+ 
+        const bar = document.getElementById('yk-splash-bar');
+        const status = document.getElementById('yk-splash-status');
+        const steps = [
+            { pct: 20, msg: '🔌 Hooking WebSocket...' },
+            { pct: 40, msg: '💥 Loading damage engine...' },
+            { pct: 60, msg: '⚡ Initializing exploits...' },
+            { pct: 80, msg: '✨ Building GUI...' },
+            { pct: 100, msg: '✧ Ready! ✧' }
+        ];
+        let si = 0;
+        const sint = GameSpeedEngine._origSetInterval(() => {
+            if (si >= steps.length) {
+                GameSpeedEngine._origClearInterval(sint);
+                GameSpeedEngine._origSetTimeout(() => { splash.classList.add('hide'); GameSpeedEngine._origSetTimeout(() => splash.remove(), 800); }, 500);
+                return;
+            }
+            bar.style.width = steps[si].pct + '%';
+            status.textContent = steps[si].msg;
+            si++;
+        }, 350);
+    }
+ 
+    // ============================================
+    // GUI
+    // ============================================
+    function createGUI() {
+        if (firstRun) {
+            showSplashScreen();
+            firstRun = false;
+        }
+ 
+        // Return if it already exists
+        if (document.getElementById('yk-root')) return;
+ 
+        const root = document.createElement('div');
+        root.id = 'yk-root';
+        root.innerHTML = `
+        <style>
+            :root {
+                --bg:rgba(12,4,24,0.96);--bg2:rgba(20,8,38,0.92);--card:rgba(28,12,48,0.88);
+                --brd:rgba(255,107,157,0.12);--bh:rgba(255,107,157,0.25);
+                --a1:#ff6b9d;--a2:#c084fc;--a3:#818cf8;--a4:#38bdf8;
+                --t1:#f5eef8;--t2:#a893c0;--grn:#34d399;--red:#fb7185;--org:#fb923c;--ylw:#fde047;
+            }
+            #yk-gear-btn {
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                width: 44px;
+                height: 44px;
+                background: rgba(12,4,24,0.85);
+                border: 1px solid rgba(255,107,157,0.3);
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                z-index: 999999;
+                box-shadow: 0 0 15px rgba(255,107,157,0.2);
+                transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                font-size: 20px;
+                color: #ff6b9d;
+                user-select: none;
+            }
+            #yk-gear-btn:hover {
+                transform: scale(1.1) rotate(45deg);
+                border-color: #c084fc;
+                box-shadow: 0 0 25px rgba(192, 132, 252, 0.4);
+                color: #c084fc;
+            }
+            #yk-gear-btn:active {
+                transform: scale(0.95);
+            }
+            #yk-menu {
+                position:fixed;top:60px;left:40px;width:420px;
+                background:var(--bg);border:1px solid var(--brd);border-radius:18px;
+                font-family:system-ui,sans-serif;color:var(--t1);z-index:99999;
+                display:none;overflow:hidden;
+                box-shadow:0 30px 80px rgba(0,0,0,.6),0 0 60px rgba(255,107,157,.05);
+            }
+            #yk-menu.open { display:block;animation:menuIn .4s ease; }
+            @keyframes menuIn { from{opacity:0;transform:scale(.9) translateY(-14px)} to{opacity:1;transform:scale(1) translateY(0)} }
+ 
+            .yk-header { display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:linear-gradient(135deg,rgba(255,107,157,.05),rgba(192,132,252,.03));border-bottom:1px solid var(--brd);cursor:move;position:relative; }
+            .yk-header::before { content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--a1),var(--a2),var(--a3),transparent);opacity:.5; }
+            .yk-header-left { display:flex;align-items:center;gap:10px; }
+            .yk-logo { width:36px;height:36px;background:linear-gradient(135deg,var(--a1),var(--a2));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:17px;box-shadow:0 3px 15px rgba(255,107,157,.3); }
+            .yk-title { font-size:17px;font-weight:900;background:linear-gradient(135deg,#ffb7d5,#c084fc,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent; }
+            .yk-badge { font-size:8px;color:var(--a1);background:rgba(255,107,157,.08);padding:2px 7px;border-radius:6px;border:1px solid rgba(255,107,157,.15);font-weight:700;letter-spacing:1px; }
+            .yk-close { width:28px;height:28px;border:1px solid var(--brd);background:var(--card);color:var(--t2);border-radius:8px;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;transition:all .2s; }
+            .yk-close:hover { background:rgba(251,113,133,.12);color:var(--red);transform:rotate(90deg); }
+ 
+            .yk-tabs { display:flex;padding:5px 5px 0;gap:2px;background:var(--bg2);border-bottom:1px solid var(--brd);overflow-x:auto;scrollbar-width:none; }
+            .yk-tabs::-webkit-scrollbar{display:none}
+            .yk-tab { flex:1;min-width:45px;padding:8px 2px 10px;border:none;background:transparent;color:var(--t2);font-size:8.5px;font-weight:700;cursor:pointer;border-radius:8px 8px 0 0;transition:all .2s;text-transform:uppercase;letter-spacing:.5px;position:relative;font-family:inherit; }
+            .yk-tab:hover { color:var(--t1); }
+            .yk-tab.on { color:#fff;background:var(--card); }
+            .yk-tab.on::after { content:'';position:absolute;bottom:0;left:15%;width:70%;height:2px;background:linear-gradient(90deg,var(--a1),var(--a2));border-radius:2px; }
+ 
+            .yk-body { padding:10px;max-height:480px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(255,107,157,.15) transparent; }
+            .yk-body::-webkit-scrollbar{width:3px}
+            .yk-body::-webkit-scrollbar-thumb{background:rgba(255,107,157,.2);border-radius:3px}
+ 
+            .yk-pane { display:none; }
+            .yk-pane.on { display:block;animation:pIn .3s ease; }
+            @keyframes pIn { from{opacity:0;transform:translateX(10px)} to{opacity:1;transform:translateX(0)} }
+ 
+            .yk-card { background:var(--card);border:1px solid var(--brd);border-radius:12px;padding:14px;margin-bottom:8px;transition:all .25s; }
+            .yk-card:hover { border-color:var(--bh);transform:translateY(-1px);box-shadow:0 4px 20px rgba(255,107,157,.06); }
+ 
+            .yk-section { font-size:8px;font-weight:800;text-transform:uppercase;letter-spacing:2px;color:var(--t2);margin-bottom:12px;display:flex;align-items:center;gap:7px; }
+            .yk-dot { width:6px;height:6px;border-radius:50%;background:var(--a1);box-shadow:0 0 8px rgba(255,107,157,.3); }
+            .yk-dot.blue{background:var(--a4)}.yk-dot.green{background:var(--grn)}.yk-dot.orange{background:var(--org)}.yk-dot.yellow{background:var(--ylw)}.yk-dot.red{background:var(--red)}
+ 
+            .yk-row { display:flex;align-items:center;justify-content:space-between;padding:7px 6px;border-radius:7px;transition:all .2s;margin:0 -6px; }
+            .yk-row:hover { background:rgba(255,107,157,.03);transform:translateX(3px); }
+            .yk-row-left { display:flex;align-items:center;gap:9px;font-size:12px;font-weight:600; }
+            .yk-icon { width:26px;height:26px;background:rgba(255,107,157,.07);border:1px solid rgba(255,107,157,.1);border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0; }
+            .yk-icon.blue{background:rgba(56,189,248,.07);border-color:rgba(56,189,248,.1)}
+            .yk-icon.green{background:rgba(52,211,153,.07);border-color:rgba(52,211,153,.1)}
+            .yk-icon.orange{background:rgba(251,146,60,.07);border-color:rgba(251,146,60,.1)}
+            .yk-icon.yellow{background:rgba(253,224,71,.07);border-color:rgba(253,224,71,.1)}
+            .yk-icon.red{background:rgba(251,113,133,.07);border-color:rgba(251,113,133,.1)}
+            .yk-desc { font-size:9px;color:var(--t2);margin-top:1px; }
+ 
+            .yk-sw { position:relative;width:38px;height:20px;flex-shrink:0; }
+            .yk-sw input { display:none; }
+            .yk-sl { position:absolute;inset:0;background:rgba(255,255,255,.05);border-radius:20px;border:1px solid rgba(255,255,255,.06);cursor:pointer;transition:all .3s; }
+            .yk-sl::before { content:'';position:absolute;width:14px;height:14px;border-radius:50%;background:#666;top:2.5px;left:2.5px;transition:all .3s; }
+            .yk-sw input:checked+.yk-sl { background:linear-gradient(135deg,var(--a1),var(--a2));border-color:rgba(255,107,157,.35);box-shadow:0 0 12px rgba(255,107,157,.2); }
+            .yk-sw input:checked+.yk-sl::before { transform:translateX(18px);background:#fff; }
+ 
+            .yk-slider-row { display:flex;align-items:center;gap:8px;padding:5px 6px; }
+            .yk-slider-row label { font-size:10px;color:var(--t2);min-width:50px;font-weight:600; }
+            .yk-slider-row input[type=range] { -webkit-appearance:none;flex:1;height:4px;border-radius:4px;background:rgba(255,255,255,.06);outline:none; }
+            .yk-slider-row input[type=range]::-webkit-slider-thumb { -webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:linear-gradient(135deg,var(--a1),var(--a2));border:2px solid rgba(255,255,255,.2);cursor:pointer; }
+            .yk-slider-val { font-size:11px;font-weight:700;color:var(--a1);min-width:30px;text-align:right; }
+ 
+            #yk-hitmarker { position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:28px;color:#fff;z-index:99998;pointer-events:none;opacity:0;transition:all .15s;text-shadow:0 0 10px rgba(255,107,157,.5); }
+            #yk-stats { position:fixed;bottom:12px;left:12px;z-index:99998;font-family:monospace;font-size:11px;color:rgba(255,255,255,.5);background:rgba(0,0,0,.5);padding:8px 12px;border-radius:8px;border:1px solid rgba(255,107,157,.1);pointer-events:none;display:none; }
+            #yk-stats.on { display:block; }
+            #yk-crosshair-custom { position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:99997;pointer-events:none;display:none; }
+            #yk-crosshair-custom.on { display:block; }
+ 
+            /* Nekoking overlays */
+            #yk-rave-overlay { position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99990;pointer-events:none;background:linear-gradient(45deg,red,orange,yellow,green,blue,indigo,violet);mix-blend-mode:screen;opacity:0.6;animation:yk-rave 1s linear infinite;display:none; }
+            #yk-color-overlay { position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99990;pointer-events:none;mix-blend-mode:multiply;display:none; }
+            #yk-chaos-overlay { position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99990;pointer-events:none;background:black;mix-blend-mode:difference;animation:yk-chaos 0.3s infinite;display:none; }
+            @keyframes yk-rave { 0%{filter:hue-rotate(0deg)} 100%{filter:hue-rotate(360deg)} }
+            @keyframes yk-chaos { 0%{background:red}25%{background:yellow}50%{background:lime}75%{background:cyan}100%{background:violet} }
+        </style>
+ 
+        <div id="yk-gear-btn">⚙️</div>
+        <div id="yk-menu">
+            <div class="yk-header" id="yk-header">
+                <div class="yk-header-left">
+                    <div class="yk-logo">⚡</div>
+                    <div><div class="yk-title">2v2.io MOD</div><span class="yk-badge">v3.2</span></div>
+                </div>
+                <div class="yk-close" id="yk-close">✕</div>
+            </div>
+ 
+            <div class="yk-tabs">
+                <div class="yk-tab on" data-tab="combat">⚔️ Combat</div>
+                <div class="yk-tab" data-tab="move">🏃 Move</div>
+                <div class="yk-tab" data-tab="visual">👁️ Visual</div>
+                <div class="yk-tab" data-tab="effects">🎨 Effects</div>
+                <div class="yk-tab" data-tab="misc">🔧 Misc</div>
+            </div>
+ 
+            <div class="yk-body">
+                <!-- COMBAT -->
+                <div class="yk-pane on" data-pane="combat">
+                    <div class="yk-card">
+                        <div class="yk-section"><div class="yk-dot red"></div>💥 HASAR SİSTEMİ</div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon red">💀</div><div><div>Damage Boost</div><div class="yk-desc">Vurduğunda hasar x10-x999 artır</div></div></div><label class="yk-sw"><input type="checkbox" data-key="damageBoost"><span class="yk-sl"></span></label></div>
+                        <div class="yk-slider-row"><label>Hasar x:</label><input type="range" min="2" max="999" step="1" value="10" data-slider="damageMultiplier"><span class="yk-slider-val" id="sv-damageMultiplier">10</span></div>
+                    </div>
+                    <div class="yk-card">
+                        <div class="yk-section"><div class="yk-dot red"></div>SAVAŞ SİSTEMİ</div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon red">🎯</div><div><div>No Recoil</div><div class="yk-desc">Geri tepme yok</div></div></div><label class="yk-sw"><input type="checkbox" data-key="noRecoil"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon orange">🔥</div><div><div>Rapid Fire</div><div class="yk-desc">Hızlı ateş</div></div></div><label class="yk-sw"><input type="checkbox" data-key="rapidFire"><span class="yk-sl"></span></label></div>
+                        <div class="yk-slider-row"><label>Fire Rate:</label><input type="range" min="1" max="999" value="30" data-slider="rapidFireRate"><span class="yk-slider-val" id="sv-rapidFireRate">30</span></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon orange">💥</div><div><div>Auto Shoot</div><div class="yk-desc">Otomatik ateş</div></div></div><label class="yk-sw"><input type="checkbox" data-key="autoShoot"><span class="yk-sl"></span></label></div>
+                    </div>
+                </div>
+ 
+                <!-- MOVEMENT -->
+                <div class="yk-pane" data-pane="move">
+                    <div class="yk-card">
+                        <div class="yk-section"><div class="yk-dot blue"></div>HAREKET</div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon blue">⚡</div><div><div>Speed Hack</div><div class="yk-desc">Hız artır</div></div></div><label class="yk-sw"><input type="checkbox" data-key="speedHack"><span class="yk-sl"></span></label></div>
+                        <div class="yk-slider-row"><label>Speed:</label><input type="range" min="1" max="10" step="0.5" value="2" data-slider="speedMultiplier"><span class="yk-slider-val" id="sv-speedMultiplier">2.0</span></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon blue">🐰</div><div><div>Bunny Hop</div><div class="yk-desc">Otomatik zıplama</div></div></div><label class="yk-sw"><input type="checkbox" data-key="bunnyHop"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon blue">↔️</div><div><div>Auto Strafe</div><div class="yk-desc">Otomatik sağ-sol</div></div></div><label class="yk-sw"><input type="checkbox" data-key="autoStrafe"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon blue">🦘</div><div><div>Infinite Jump</div><div class="yk-desc">Sınırsız zıplama</div></div></div><label class="yk-sw"><input type="checkbox" data-key="infiniteJump"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon blue">🛡️</div><div><div>No Fall Damage</div><div class="yk-desc">Düşme hasarı yok</div></div></div><label class="yk-sw"><input type="checkbox" data-key="noFallDamage"><span class="yk-sl"></span></label></div>
+                    </div>
+                    <div class="yk-card">
+                        <div class="yk-section"><div class="yk-dot yellow"></div>OYUN HIZI</div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon yellow">⏩</div><div><div>Game Speed</div><div class="yk-desc">Oyun hızını değiştir</div></div></div><label class="yk-sw"><input type="checkbox" data-key="gameSpeedEnabled"><span class="yk-sl"></span></label></div>
+                        <div class="yk-slider-row"><label>Speed:</label><input type="range" min="0.5" max="5" step="0.1" value="1" data-slider="gameSpeed"><span class="yk-slider-val" id="sv-gameSpeed">1.0</span></div>
+                    </div>
+                </div>
+ 
+                <!-- VISUAL -->
+                <div class="yk-pane" data-pane="visual">
+                    <div class="yk-card">
+                        <div class="yk-section"><div class="yk-dot green"></div>GÖRSEL</div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon green">💀</div><div><div>ESP (İskelet)</div><div class="yk-desc">Wireframe + X-Ray = iskelet</div></div></div><label class="yk-sw"><input type="checkbox" data-key="esp"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon green">📐</div><div><div>Wireframe</div><div class="yk-desc">Tel kafes görünüm</div></div></div><label class="yk-sw"><input type="checkbox" data-key="wireframe"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon green">🔍</div><div><div>X-Ray</div><div class="yk-desc">Duvar arkası görüş</div></div></div><label class="yk-sw"><input type="checkbox" data-key="xray"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon green">🎯</div><div><div>Custom Crosshair</div><div class="yk-desc">Özel nişangah</div></div></div><label class="yk-sw"><input type="checkbox" data-key="crosshairCustom"><span class="yk-sl"></span></label></div>
+                    </div>
+                </div>
+ 
+                <!-- EFFECTS (Nekoking) -->
+                <div class="yk-pane" data-pane="effects">
+                    <div class="yk-card">
+                        <div class="yk-section"><div class="yk-dot"></div>🌈 EFEKTLER</div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon">🌈</div><div><div>Rave Mode</div><div class="yk-desc">Gökkuşağı renk efekti</div></div></div><label class="yk-sw"><input type="checkbox" data-key="raveMode"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon">🎨</div><div><div>Color Mod</div><div class="yk-desc">Ekrana renk filtresi</div></div></div><label class="yk-sw"><input type="checkbox" data-key="colorMod"><span class="yk-sl"></span></label></div>
+                        <div class="yk-slider-row"><label>Opacity:</label><input type="range" min="0.05" max="0.5" step="0.05" value="0.2" data-slider="colorModOpacity"><span class="yk-slider-val" id="sv-colorModOpacity">0.2</span></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon red">💥</div><div><div>Chaos Mode</div><div class="yk-desc">Çılgın renk patlaması</div></div></div><label class="yk-sw"><input type="checkbox" data-key="chaosMode"><span class="yk-sl"></span></label></div>
+                    </div>
+                    <div class="yk-card">
+                        <div class="yk-section"><div class="yk-dot yellow"></div>PERFORMANS</div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon yellow">🚀</div><div><div>Performance Mode</div><div class="yk-desc">Pixelated render + düşük kalite</div></div></div><label class="yk-sw"><input type="checkbox" data-key="performanceMode"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon yellow">🚫</div><div><div>Ad Remover</div><div class="yk-desc">Reklamları kaldır</div></div></div><label class="yk-sw"><input type="checkbox" data-key="adRemover"><span class="yk-sl"></span></label></div>
+                </div>
+ 
+                <!-- MISC -->
+                <div class="yk-pane" data-pane="misc">
+                    <div class="yk-card">
+                        <div class="yk-section"><div class="yk-dot orange"></div>EKSTRA</div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon orange">🔄</div><div><div>Auto Respawn</div><div class="yk-desc">Otomatik yeniden doğ</div></div></div><label class="yk-sw"><input type="checkbox" data-key="autoRespawn"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon orange">☕</div><div><div>Anti AFK</div><div class="yk-desc">AFK atılmayı engelle</div></div></div><label class="yk-sw"><input type="checkbox" data-key="antiAFK"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon orange">🌀</div><div><div>Spin Bot</div><div class="yk-desc">Sürekli dön</div></div></div><label class="yk-sw"><input type="checkbox" data-key="spinBot"><span class="yk-sl"></span></label></div>
+                        <div class="yk-slider-row"><label>Spin Spd:</label><input type="range" min="5" max="30" value="15" data-slider="spinSpeed"><span class="yk-slider-val" id="sv-spinSpeed">15</span></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon yellow">🚀</div><div><div>FPS Boost</div><div class="yk-desc">Performans artır</div></div></div><label class="yk-sw"><input type="checkbox" data-key="fpsBoost"><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon yellow">✖</div><div><div>Hit Marker</div><div class="yk-desc">Vuruş işareti</div></div></div><label class="yk-sw"><input type="checkbox" data-key="hitMarker" checked><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon yellow">🔊</div><div><div>Kill Sound</div><div class="yk-desc">Öldürme sesi</div></div></div><label class="yk-sw"><input type="checkbox" data-key="killSound" checked><span class="yk-sl"></span></label></div>
+                        <div class="yk-row"><div class="yk-row-left"><div class="yk-icon yellow">📊</div><div><div>Stats Overlay</div><div class="yk-desc">İstatistik göster</div></div></div><label class="yk-sw"><input type="checkbox" data-key="statsOverlay" checked><span class="yk-sl"></span></label></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+ 
+        <div id="yk-hitmarker">✕</div>
+        <div id="yk-stats"><b>2v2.io MOD Stats</b><br>Kills: <span id="yk-kills">0</span></div>
+        <div id="yk-crosshair-custom"><svg width="24" height="24"><line x1="12" y1="0" x2="12" y2="10" stroke="red" stroke-width="2"/><line x1="12" y1="14" x2="12" y2="24" stroke="red" stroke-width="2"/><line x1="0" y1="12" x2="10" y2="12" stroke="red" stroke-width="2"/><line x1="14" y1="12" x2="24" y2="12" stroke="red" stroke-width="2"/><circle cx="12" cy="12" r="2" fill="red"/></svg></div>
+        <div id="yk-rave-overlay"></div>
+        <div id="yk-color-overlay"></div>
+        <div id="yk-chaos-overlay"></div>
+        `;
+ 
+        document.body.appendChild(root);
+ 
+        // Sync checkbox states
+        root.querySelectorAll('[data-key]').forEach(input => {
+            const key = input.dataset.key;
+            input.checked = !!config[key];
+        });
+ 
+        // Sync slider positions and labels
+        root.querySelectorAll('[data-slider]').forEach(slider => {
+            const key = slider.dataset.slider;
+            slider.value = config[key];
+            const display = root.querySelector(`#sv-${key}`);
+            if (display) {
+                const val = config[key];
+                display.textContent = val % 1 === 0 ? val : val.toFixed(key === 'colorModOpacity' ? 2 : 1);
+            }
+        });
+ 
+        // Update display elements based on initial values
+        const menu = root.querySelector('#yk-menu');
+        if (menu) menu.classList.toggle('open', menuOpen);
+ 
+        const stats = root.querySelector('#yk-stats');
+        if (stats) stats.classList.toggle('on', config.statsOverlay);
+ 
+        const crosshair = root.querySelector('#yk-crosshair-custom');
+        if (crosshair) crosshair.classList.toggle('on', config.crosshairCustom);
+ 
+        const rave = root.querySelector('#yk-rave-overlay');
+        if (rave) rave.style.display = config.raveMode ? 'block' : 'none';
+ 
+        const colorOverlay = root.querySelector('#yk-color-overlay');
+        if (colorOverlay) {
+            colorOverlay.style.display = config.colorMod ? 'block' : 'none';
+            colorOverlay.style.backgroundColor = config.colorModColor;
+            colorOverlay.style.opacity = config.colorModOpacity;
+        }
+ 
+        const chaos = root.querySelector('#yk-chaos-overlay');
+        if (chaos) chaos.style.display = config.chaosMode ? 'block' : 'none';
+ 
+        if (config.performanceMode) document.body.style.imageRendering = 'pixelated';
+        if (config.adRemover) removeAds();
+ 
+        console.log('%c[2v2.io MOD] GUI created/restored ✧', 'color:#ff6b9d');
+    }
+ 
+    // ============================================
+    // EVENTS DELEGATION (Safe from DOM replacement)
+    // ============================================
+ 
+    // ── Click events ──
+    document.addEventListener('click', e => {
+        // Gear Button Toggle
+        if (e.target.closest('#yk-gear-btn')) {
+            menuOpen = !menuOpen;
+            const menu = document.getElementById('yk-menu');
+            if (menu) menu.classList.toggle('open', menuOpen);
+            return;
+        }
+ 
+        // Close Button
+        if (e.target.closest('#yk-close')) {
+            menuOpen = false;
+            const menu = document.getElementById('yk-menu');
+            if (menu) menu.classList.remove('open');
+            return;
+        }
+ 
+        // Tab switches
+        const tab = e.target.closest('.yk-tab');
+        if (tab) {
+            document.querySelectorAll('.yk-tab').forEach(t => t.classList.remove('on'));
+            document.querySelectorAll('.yk-pane').forEach(p => p.classList.remove('on'));
+            tab.classList.add('on');
+            const pane = document.querySelector(`.yk-pane[data-pane="${tab.dataset.tab}"]`);
+            if (pane) pane.classList.add('on');
+            return;
+        }
+    });
+ 
+    // ── Toggle switches ──
+    document.addEventListener('change', e => {
+        const input = e.target;
+        if (!input.hasAttribute('data-key')) return;
+        const key = input.dataset.key;
+        config[key] = input.checked;
+ 
+        if (key === 'speedHack') input.checked ? startSpeedHack() : stopSpeedHack();
+        if (key === 'rapidFire') input.checked ? startRapidFire() : stopRapidFire();
+        if (key === 'bunnyHop') input.checked ? startBunnyHop() : stopBunnyHop();
+        if (key === 'autoStrafe') input.checked ? startAutoStrafe() : stopAutoStrafe();
+        if (key === 'infiniteJump' && input.checked) startInfiniteJump();
+        if (key === 'spinBot') input.checked ? startSpinBot() : stopSpinBot();
+        if (key === 'antiAFK') input.checked ? startAntiAFK() : stopAntiAFK();
+        if (key === 'autoRespawn') input.checked ? startAutoRespawn() : stopAutoRespawn();
+        if (key === 'gameSpeedEnabled') {
+            if (input.checked) GameSpeedEngine.enable(config.gameSpeed);
+            else GameSpeedEngine.disable();
+        }
+        if (key === 'esp') {
+            config.wireframe = input.checked;
+            config.xray = input.checked;
+            const wf = document.querySelector('[data-key="wireframe"]');
+            const xr = document.querySelector('[data-key="xray"]');
+            if (wf) wf.checked = input.checked;
+            if (xr) xr.checked = input.checked;
+        }
+        if (key === 'crosshairCustom') document.getElementById('yk-crosshair-custom')?.classList.toggle('on', input.checked);
+        if (key === 'statsOverlay') document.getElementById('yk-stats')?.classList.toggle('on', input.checked);
+ 
+        // Nekoking overlays
+        const rave = document.getElementById('yk-rave-overlay');
+        if (rave) rave.style.display = config.raveMode ? 'block' : 'none';
+ 
+        const colorOverlay = document.getElementById('yk-color-overlay');
+        if (colorOverlay) {
+            colorOverlay.style.display = config.colorMod ? 'block' : 'none';
+            colorOverlay.style.backgroundColor = config.colorModColor;
+            colorOverlay.style.opacity = config.colorModOpacity;
+        }
+ 
+        const chaos = document.getElementById('yk-chaos-overlay');
+        if (chaos) chaos.style.display = config.chaosMode ? 'block' : 'none';
+ 
+        if (key === 'performanceMode') document.body.style.imageRendering = input.checked ? 'pixelated' : '';
+        if (key === 'adRemover' && input.checked) removeAds();
+    });
+ 
+    // ── Sliders ──
+    document.addEventListener('input', e => {
+        const slider = e.target;
+        if (!slider.hasAttribute('data-slider')) return;
+        const key = slider.dataset.slider;
+        const val = parseFloat(slider.value);
+        config[key] = val;
+        const display = document.getElementById(`sv-${key}`);
+        if (display) display.textContent = val % 1 === 0 ? val : val.toFixed(key === 'colorModOpacity' ? 2 : 1);
+        if (key === 'gameSpeed' && config.gameSpeedEnabled) GameSpeedEngine.enable(val);
+        if (key === 'colorModOpacity' && config.colorMod) {
+            const overlay = document.getElementById('yk-color-overlay');
+            if (overlay) overlay.style.opacity = val;
+        }
+    });
+ 
+    // ── Dragging logic ──
+    let dragging = false, dx = 0, dy = 0;
+    document.addEventListener('mousedown', e => {
+        const header = e.target.closest('#yk-header');
+        if (!header || e.target.classList.contains('yk-close')) return;
+        const menu = document.getElementById('yk-menu');
+        if (!menu) return;
+        dragging = true;
+        const r = menu.getBoundingClientRect();
+        dx = e.clientX - r.left;
+        dy = e.clientY - r.top;
+    });
+    document.addEventListener('mousemove', e => {
+        if (!dragging) return;
+        const menu = document.getElementById('yk-menu');
+        if (!menu) return;
+        menu.style.left = (e.clientX - dx) + 'px';
+        menu.style.top = (e.clientY - dy) + 'px';
+    });
+    document.addEventListener('mouseup', () => dragging = false);
+ 
+    // ── INSERT Key Bind (Capture Phase, bypass block) ──
+    window.addEventListener('keydown', e => {
+        if (e.key === 'Insert') {
+            e.preventDefault();
+            e.stopPropagation();
+            menuOpen = !menuOpen;
+            const menu = document.getElementById('yk-menu');
+            if (menu) menu.classList.toggle('open', menuOpen);
+        }
+    }, true);
+ 
+    // ============================================
+    // INIT & DOM MONITORING
+    // ============================================
+    function init() {
+        // Monitor DOM to ensure GUI stays present even if game script refreshes document.body
+        GameSpeedEngine._origSetInterval(() => {
+            if (document.body) {
+                createGUI();
+            }
+        }, 1000);
+    }
+ 
+    init();
+ 
+} catch (err) {
+    console.error('[2v2.io MOD] Fatal initialization error:', err);
+}
+ 
+})();
