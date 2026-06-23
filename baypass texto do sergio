@@ -1,0 +1,23 @@
+(async () => {
+    const texto = `coloco seu texto aqui para gerar by sergio.`;
+
+    const campo = document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
+    
+    if (!campo) {
+        console.error("Não encontrei a caixa de texto! Clique nela primeiro.");
+        return;
+    }
+
+    campo.focus();
+    for (const letra of texto) {
+        // Insere a letra no campo
+        document.execCommand('insertText', false, letra);
+        // Pequena pausa para simular humano (opcional, mas ajuda a não bugar)
+        await new Promise(r => setTimeout(r, 5)); 
+    }
+    
+    // Força o site a reconhecer o texto
+    campo.dispatchEvent(new Event('input', { bubbles: true }));
+    campo.dispatchEvent(new Event('change', { bubbles: true }));
+    console.log("Pronto! Texto inserido com simulação de teclado.");
+})();
